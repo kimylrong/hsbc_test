@@ -1,0 +1,43 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.env
+.ruff_cache/
+.pytest_cache/
+*.db
+*.db-journal
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+build/
+coverage/
+.env.local
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+
+# Java / Maven / Spring
+target/
+*.class
+*.jar
+*.log
+
+# uv
+uv.lock
+
+# Task 1 artifacts (trained model — too large for git)
+service_house_price_predictor/artifacts/

@@ -1,0 +1,96 @@
+services:
+  # Task 1: property price prediction model service (internal-only, called by backends)
+  task1-ml-api:
+    build:
+      context: ./service_house_price_predictor
+    image: hsbc/task1-ml-api
+    ports:
+      - "8000:8000"
+    networks:
+      - hsbc-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ready').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+
+  # App 1: Property Value Estimator backend (FastAPI + SQLite)
+  property-value-estimator:
+    build:
+      context: ./service_property_value_estimator
+    image: hsbc/property-value-estimator
+    environment:
+      MODEL_API_URL: http://task1-ml-api:8000
+      DB_PATH: /app/data/estimates.db
+    ports:
+      - "8001:8001"
+    volumes:
+      - estimator-data:/app/data
+    depends_on:
+      task1-ml-api:
+        condition: service_healthy
+    networks:
+      - hsbc-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/ready').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+
+  # App 2: Property Market Analysis backend (Spring Boot + Caffeine cache)
+  property-market-analysis:
+    build:
+      context: ./service_property_market_analysis
+    image: hsbc/property-market-analysis
+    environment:
+      MODEL_API_URL: http://task1-ml-api:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      task1-ml-api:
+        condition: service_healthy
+    networks:
+      - hsbc-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  # Portal: unified Next.js web app (SSR + client, single entry point)
+  web-portal:
+    build:
+      context: ./web_portal
+      args:
+        PY_BACKEND_URL: http://property-value-estimator:8001
+        JAVA_BACKEND_URL: http://property-market-analysis:8080
+    image: hsbc/web-portal
+    environment:
+      PY_BACKEND_URL: http://property-value-estimator:8001
+      JAVA_BACKEND_URL: http://property-market-analysis:8080
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      property-value-estimator:
+        condition: service_healthy
+      property-market-analysis:
+        condition: service_healthy
+    networks:
+      - hsbc-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+networks:
+  hsbc-net:
+    driver: bridge
+
+volumes:
+  estimator-data:

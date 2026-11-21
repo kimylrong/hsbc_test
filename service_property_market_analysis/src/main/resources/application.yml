@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: property-market-analysis
+  cache:
+    cache-names: analyze
+    caffeine:
+      spec: maximumSize=500,expireAfterWrite=10m
+
+server:
+  port: 8080
+
+model:
+  api:
+    url: ${MODEL_API_URL:http://localhost:8000}
