@@ -1,0 +1,35 @@
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: false
+      templates:
+        - config:
+            - type: filestream
+              id: "docker-container-${data.docker.container.id}"
+              paths:
+                - "/var/lib/docker/containers/${data.docker.container.id}/*.log"
+              parsers:
+                - ndjson:
+                    target: ""
+                    overwrite_keys: true
+              prospector.scanner.symlinks: true
+              close.on_state_change.inactive: 24h
+              clean_inactive: 72h
+
+processors:
+  - add_docker_metadata:
+      host: "$NODE_NAME"
+  - decode_json_fields:
+      fields: ["log"]
+      target: ""
+      overwrite_keys: true
+      max_depth: 5
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  index: "hsbc-logs-%{+yyyy.MM.dd}"
+  bulk_max_size: 1024
+  compression_level: 3
+
+setup.template.enabled: false
+setup.ilm.enabled: false

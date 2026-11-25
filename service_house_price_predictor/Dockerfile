@@ -10,6 +10,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src/ ./src/
 COPY artifacts/ ./artifacts/
 
-EXPOSE 8000
+EXPOSE 8010
 
-CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8010", "--no-access-log"]

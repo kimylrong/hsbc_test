@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
-const PY_BACKEND_URL = process.env.PY_BACKEND_URL ?? "http://localhost:8001";
-const JAVA_BACKEND_URL = process.env.JAVA_BACKEND_URL ?? "http://localhost:8080";
+const PY_BACKEND_URL = process.env.PY_BACKEND_URL ?? "http://localhost:8020";
+const JAVA_BACKEND_URL = process.env.JAVA_BACKEND_URL ?? "http://localhost:8030";
 
 const nextConfig: NextConfig = {
   output: "standalone",

@@ -80,7 +80,9 @@ export function ComposedChartGrid({ charts }: { charts: ChartData[] }) {
                     yAxisId="left"
                     dataKey="count"
                     name="Count"
-                    fill="#d9dde1"
+                    fill="#c4c8cc"
+                    stroke="#171717"
+                    strokeWidth={1}
                     radius={[3, 3, 0, 0]}
                   />
                   <Line

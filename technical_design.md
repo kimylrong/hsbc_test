@@ -228,3 +228,429 @@ src/
 ```
 
 * Configure the inter-service internal-network addresses in `docker-compose.yml` (e.g. `MODEL_API_URL=http://task1-ml-api:8000`, `PY_BACKEND_URL=http://property-value-estimator:8001`, `JAVA_BACKEND_URL=http://property-market-analysis:8080`), and mount a data directory for the Python backend to persist the SQLite file — enabling one-command startup and full end-to-end integration.
+
+---
+
+## 5. Observability Protocol — Unified Logging & Metrics
+
+> This section defines the **canonical observability protocol** for all four services. Every service MUST conform to this specification regardless of language/framework. The goal is a single Prometheus scrape endpoint that produces identical metric names/labels across Python, Java, and Node.js, and stdout JSON logs that a Loki/ELK pipeline can parse with one regex.
+
+### 5.1 Architecture Overview
+
+```
+                      ┌─────────────────────────────────────────────────────────────────┐
+                      │                     Observability Backend Layer                  │
+                      │                                                                 │
+                      │   ┌────────────────────┐    ┌────────────────────────────────┐   │
+                      │   │   Prometheus        │    │   Loki (or ELK / CloudWatch)    │   │
+                      │   │   scrape ───────────│    │   container log driver collects │   │
+                      │   └──────────┬─────────┘    └──────────────┬─────────────────┘   │
+                      │              │                               │                     │
+                      │   ┌──────────▼─────────┐    ┌──────────────▼─────────────────┐   │
+                      │   │   Grafana Dashboard │    │   LogQL / Kibana / CloudWatch   │   │
+                      │   │   (single datasource)│   │   Query                          │   │
+                      │   └────────────────────┘    └────────────────────────────────┘   │
+                      └────────────────────────┬────────────────────────────────────────┘
+                                               │ scrape / collect
+        ┌──────────────────────────────────────┼──────────────────────────────────────┐
+        │                                      │                                      │
+        ▼                                      ▼                                      ▼
+   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+   │ task1-ml-api │    │  estimator   │    │  java-svc    │    │  web-portal  │
+   │  Python 3.12 │    │  Python 3.12 │    │  Java 21     │    │  Node.js     │
+   │  FastAPI     │    │  FastAPI     │    │  Spring Boot │    │  Next.js     │
+   │              │    │              │    │  3.4.4       │    │  16          │
+   │ /metrics     │    │ /metrics     │    │ /metrics     │    │ /metrics     │
+   │ stdout JSON  │    │ stdout JSON  │    │ stdout JSON  │    │ stdout JSON  │
+   └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+
+   All services → Docker container stdout → docker logs driver → Loki/ELK collector
+   All services → native Prometheus client → /metrics endpoint → Prometheus scrape
+```
+
+### 5.2 Metric Protocol
+
+#### 5.2.1 Canonical Metric Definitions (Prometheus Text Format)
+
+Every service MUST expose exactly these two metrics at its `/metrics` endpoint. No other application-defined metrics are required at this stage (business-specific metrics can be added later under their own namespace).
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `http_requests_total` | Counter (monotonically increasing) | Total number of HTTP requests processed |
+| `http_request_duration_seconds` | Histogram | HTTP request latency in seconds, with built-in `_count`, `_sum`, and `_bucket{le="..."}` series |
+
+#### 5.2.2 Canonical Label (Tag) Set
+
+Both metrics MUST carry exactly the following four labels, in this order. No extras, no omissions.
+
+| Label Name | Value Format | Example | Notes |
+|------------|--------------|---------|-------|
+| `service` | Fixed string | `"property-market-analysis"` | Must match the service identifier in `docker-compose.yml` service name |
+| `endpoint` | URL path template | `"/api/estimator/predict"` or `"/api/market/analyze"` | NOT the raw request URI with query strings. Use the route pattern that matches the request (no `/api/estimator/predict?foo=bar`) |
+| `method` | Uppercase HTTP verb | `"GET"`, `"POST"` | |
+| `status_code` | String of exact HTTP status | `"200"`, `"422"`, `"500"` | **Must be the raw status code, NOT grouped into `"2xx"` / `"5xx"`**. This enables flexible PromQL slicing: success-rate, client-error vs server-error, etc. |
+
+**Rationale for exact vs grouped status_code:** Grouping loses information. With exact codes you can write:
+```promql
+# 5xx error rate only (server-side problems)
+sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m]))
+/ sum by (service) (rate(http_requests_total[5m]))
+
+# 4xx rate (client input validation failures)
+sum by (service) (rate(http_requests_total{status_code=~"4.."}[5m]))
+/ sum by (service) (rate(http_requests_total[5m]))
+
+# P99 latency for 5xx responses (are timeouts causing failures?)
+histogram_quantile(0.99, sum by (endpoint, le) (rate(http_request_duration_seconds{status_code=~"5.."}[5m])))
+```
+
+#### 5.2.3 Canonical Histogram Buckets
+
+All three implementations MUST use identical bucket boundaries so that Prometheus `histogram_quantile()` produces comparable results across services.
+
+```python
+# Buckets in seconds (Prometheus default + a few extra for ML inference scenarios)
+[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 30.0, 60.0]
+```
+
+Plus the obligatory `le="+Inf"` bucket added by every Prometheus client library.
+
+#### 5.2.4 Expected `/metrics` Output Shape
+
+```text
+# HELP http_requests_total Total number of HTTP requests processed
+# TYPE http_requests_total counter
+http_requests_total{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200"} 1523
+http_requests_total{service="task1-ml-api",endpoint="/predict",method="POST",status_code="500"} 17
+http_requests_total{service="task1-ml-api",endpoint="/health",method="GET",status_code="200"} 4521
+
+# HELP http_request_duration_seconds HTTP request latency in seconds
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200",le="0.1"} 800
+http_request_duration_seconds_bucket{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200",le="0.5"} 1400
+http_request_duration_seconds_bucket{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200",le="+Inf"} 1523
+http_request_duration_seconds_count{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200"} 1523
+http_request_duration_seconds_sum{service="task1-ml-api",endpoint="/predict",method="POST",status_code="200"} 61.2
+```
+
+### 5.3 Metric Implementation Feasibility by Framework
+
+This is the critical analysis: can each framework produce **identical** metric names, label names, and label values as defined above?
+
+#### 5.3.1 Python FastAPI — ✅ Fully Aligned
+
+**Library:** `prometheus-fastapi-instrumentator` v8.x (wraps `prometheus_client` v0.26)
+
+**Default behavior:** The library already defaults to `http_requests_total` (Counter) and `http_request_duration_seconds` (Histogram). However, its default labels use `handler` instead of `endpoint`, and `should_group_status_codes=True` produces `"2xx"` instead of `"200"`.
+
+**Alignment configuration (verified by reading source):**
+```python
+Instrumentator(
+    should_group_status_codes=False,          # ← critical: "200" not "2xx"
+    should_ignore_untemplated=True,
+    excluded_handlers=["/docs", "/redoc", "/openapi.json"],
+).add(
+    requests(
+        metric_name="http_requests_total",
+        should_include_handler=True,          # becomes our "endpoint"
+        should_include_method=True,
+        should_include_status=True,
+        custom_labels={"service": "task1-ml-api"},  # ← add service label
+    ),
+    latency(
+        metric_name="http_request_duration_seconds",
+        should_include_handler=True,
+        should_include_method=True,
+        should_include_status=True,
+        custom_labels={"service": "task1-ml-api"},
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 30.0, 60.0),
+    ),
+).instrument(app).expose(app)
+```
+
+**Label name remapping problem:** The library hardcodes `handler` as the label name. We need `endpoint`. Two solutions:
+- **Solution A (recommended):** Use `MeterFilter`... no wait, this is Python. Actually `prometheus_fastapi_instrumentator` v8 passes label names directly to `prometheus_client.Counter(labelnames=[...])`, and the label names are `("handler", "method", "status")` by default. We need to patch this.
+- **Solution B:** Write our own tiny middleware using raw `prometheus_client.Counter` and `prometheus_client.Histogram` — about 30 lines of code, no dependency magic.
+
+**Decision:** Use **Solution B** (raw prometheus_client). The library is convenient but inflexible on label names. Writing a middleware is trivial and gives us exact control.
+
+#### 5.3.2 Java Spring Boot — ✅ Fully Aligned (with native Prometheus client)
+
+**Problem with Micrometer (the default):** Spring Boot Actuator + `micrometer-registry-prometheus` produces **different metric names and label names** from our canonical spec by default:
+
+| Aspect | Micrometer default | Our canonical spec |
+|--------|-------------------|-------------------|
+| Counter name | `http_server_requests_seconds_count` (Timer auto-split) | `http_requests_total` |
+| Histogram name | `http_server_requests_seconds_bucket` (Timer auto-split) | `http_request_duration_seconds_bucket` |
+| Endpoint label | `uri` | `endpoint` |
+| Service label | ❌ missing | `service` |
+| Extra labels | `outcome`, `exception` | ❌ not allowed |
+
+Micrometer does support `MeterFilter.renameTag()` and custom `NamingConvention`, but **it cannot split a Timer into separate Counter + Histogram with arbitrary names**. The naming transformation (`http.server.requests` → `http_server_requests_seconds_count`) is baked into Micrometer's Prometheus naming convention.
+
+**Solution — Use `prometheus-client_java` directly alongside Actuator:**
+
+Add to `pom.xml`:
+```xml
+<dependency>
+    <groupId>io.prometheus</groupId>
+    <artifactId>simpleclient</artifactId>
+    <version>0.16.0</version>
+</dependency>
+<dependency>
+    <groupId>io.prometheus</groupId>
+    <artifactId>simpleclient_common</artifactId>
+    <version>0.16.0</version>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+Then write a `OncePerRequestFilter` (~40 lines) that:
+1. Records `method`, `endpoint` (from `HandlerMapping` lookup or URI template pattern), `status_code`, `service`
+2. Observes latency
+3. Calls `Counter.build().name("http_requests_total").labelNames("service","endpoint","method","status_code")...inc()`
+4. Calls `Histogram.build().name("http_request_duration_seconds").labelNames("service","endpoint","method","status_code")...observe(seconds)`
+
+Then expose `/actuator/prometheus` (Actuator auto-configures this endpoint when the dependency is present) or a dedicated `/metrics` controller. The `PrometheusRegistry.defaultRegistry` will contain both Micrometer auto-metrics (JVM memory, threads, etc.) and our manually registered HTTP metrics — but we configure `management.endpoints.web.exposure.include=prometheus` and optionally filter Micrometer's HTTP auto-metric out if needed.
+
+**Alternative (simpler, less precise):** Keep Micrometer HTTP metrics as-is and add Prometheus recording rules in Prometheus config to rename:
+```yaml
+groups:
+  - name: http_metrics_renamed
+    rules:
+      - record: http_requests_total
+        expr: sum by (uri, method, status) (http_server_requests_seconds_count)
+        labels:
+          service: "property-market-analysis"
+          endpoint: "{{ $labels.uri }}"
+      - record: http_request_duration_seconds_bucket
+        expr: http_server_requests_seconds_bucket
+        labels:
+          service: "property-market-analysis"
+          endpoint: "{{ $labels.uri }}"
+```
+This is less clean because PromQL can't easily rename labels in recording rules. **We recommend the native client approach.**
+
+#### 5.3.3 Next.js / Node.js — ✅ Fully Aligned
+
+**Library:** `prom-client` (the official Prometheus JS client, v15.x)
+
+Add to `package.json`:
+```json
+{
+  "dependencies": {
+    "prom-client": "^15.1.3"
+  }
+}
+```
+
+**Implementation:**
+1. Register a `Counter` and `Histogram` at module load time with our canonical names and labels
+2. Wrap all server-side fetch calls in middleware that records metrics
+3. Expose a `/api/metrics` Route Handler that calls `register.metrics()`
+
+Since Next.js App Router uses Route Handlers, we create `app/api/metrics/route.ts`:
+```typescript
+import { register } from 'prom-client';
+export async function GET() {
+  return new Response(await register.metrics(), {
+    headers: { 'Content-Type': register.contentType },
+  });
+}
+```
+
+### 5.4 Log Protocol
+
+#### 5.4.1 Canonical JSON Schema
+
+Every service MUST output **one JSON object per log line** to `stdout`. No plain text, no file-based logging, no stderr splitting. Docker's log driver (json-file by default, or fluentd for production) collects everything automatically.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `timestamp` | ISO-8601 string | ✅ | UTC with milliseconds and Z suffix: `"2026-11-25T10:30:00.123Z"` |
+| `level` | enum | ✅ | `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"` |
+| `service` | string | ✅ | Same identifier as metric `service` label |
+| `logger` | string | ✅ | Logger name (Python module, Java class, Node module) |
+| `message` | string | ✅ | Human-readable log message |
+| `trace_id` | string | ⚠️ | Required when inside a request context. 12-char hex. Absent for startup/shutdown logs |
+| `method` | string | ⚠️ | HTTP method, only present for request logs |
+| `path` | string | ⚠️ | Raw request path (may include query string), only present for request logs |
+| `status_code` | number | ⚠️ | HTTP status code, only present for response logs |
+| `latency_ms` | number | ⚠️ | Request latency in milliseconds, only present for response logs |
+| `exception` | string | ⚠️ | Full stack trace as string, only present for ERROR logs |
+
+**Example — normal request:**
+```json
+{"timestamp":"2026-11-25T10:30:00.123Z","level":"INFO","service":"task1-ml-api","logger":"src.main","trace_id":"a1b2c3d4e5f6","method":"POST","path":"/predict","status_code":200,"latency_ms":42.3,"message":"POST /predict status=200 latency_ms=42.3"}
+```
+
+**Example — startup log (no trace_id):**
+```json
+{"timestamp":"2026-11-25T10:30:00.001Z","level":"INFO","service":"task1-ml-api","logger":"src.main","message":"Loaded model=RandomForestRegressor (train_samples=2000, cv_rmse=12500, cv_r2=0.89)"}
+```
+
+**Example — error log:**
+```json
+{"timestamp":"2026-11-25T10:30:00.456Z","level":"ERROR","service":"estimator","logger":"src.main","trace_id":"a1b2c3d4e5f6","method":"POST","path":"/api/estimator/predict","status_code":502,"latency_ms":1503.0,"message":"Model service error: HTTPConnectionPool(host='task1-ml-api', port=8000): Read timed out.","exception":"Traceback (most recent call last):\n  File \"src/client.py\", line 45, in predict\n    response = await self._client.post(...)"}
+```
+
+#### 5.4.2 Trace ID Propagation
+
+`trace_id` is a 12-character hex string (sufficiently unique for a single-user request trace, short enough to fit comfortably in log lines and HTTP headers).
+
+**Universal rule — every service does the same thing on every request:**
+```
+if incoming request has X-Trace-ID header:
+    trace_id = header value          // reuse upstream
+else:
+    trace_id = generate_hex(12)      // we are the first hop, create one
+```
+
+No service is privileged. Any service can be the ingress point: `web-portal`, a future LB/Ingress controller, direct curl to any backend, etc. The `trace_id` simply belongs to the request and travels with it, regardless of where it was born.
+
+**Propagation chain (current topology):**
+```
+Browser → Next.js (no X-Trace-ID → generates abc123def456)
+  ├─ POST /api/estimator/predict  header: X-Trace-ID: abc123def456
+  │     → Python Estimator (reuses abc123def456; forwards to ML API)
+  │           └─ POST /predict  header: X-Trace-ID: abc123def456
+  │                 → ML API (reuses abc123def456)
+  │
+  └─ POST /api/market/analyze  header: X-Trace-ID: abc123def456
+        → Java Service (reuses abc123def456; forwards to ML API)
+              └─ POST /predict/batch  header: X-Trace-ID: abc123def456
+                    → ML API (same abc123def456 — cross-app correlation!)
+```
+
+**Propagation chain (future topology with LB in front):**
+```
+Browser → LB (generates fedcba987654, injects X-Trace-ID)
+  ├─ → Next.js (reuses fedcba987654)
+  │     → Estimator (reuses fedcba987654) → ML API (reuses fedcba987654)
+  │
+  └─ → Next.js (reuses fedcba987654)
+        → Java Service (reuses fedcba987654) → ML API (reuses fedcba987654)
+```
+No code changes required when the ingress point moves — the same rule works everywhere.
+
+**Logging middleware responsibility:** Every service must install an HTTP middleware that:
+1. On request arrival: check for `X-Trace-ID` header, or generate a new one → store in request context
+2. Pass `trace_id` to the structured logger for every log line emitted during that request
+3. On outgoing HTTP calls to downstream services: inject `X-Trace-ID` header
+
+### 5.5 Log Implementation Feasibility by Framework
+
+#### 5.5.1 Python FastAPI — ✅ Fully Aligned
+
+**Library:** `logging` (stdlib) with a custom `jsonlogging.JSONFormatter` or a hand-rolled `logging.Formatter`.
+
+**ML API (task1-ml-api) already 90% there:** The existing `_JsonFormatter` in `src/main.py:29-42` already produces JSON per line with `timestamp`, `level`, `logger`, `message`, and optional `request_id` / `exception`. Changes needed:
+1. Rename `request_id` → `trace_id`
+2. Add `service` field (hardcoded to `"task1-ml-api"` or read from env)
+3. Extend middleware to extract/generate `trace_id`, add method/path/status_code/latency_ms fields
+4. Inject `X-Trace-ID` header when calling downstream (currently doesn't call downstream; Estimator calls it)
+
+**Estimator (property-value-estimator) needs full implementation:** Currently only has `logging.basicConfig()` with text format. Needs the same JSON formatter + middleware pattern.
+
+**Outgoing `X-Trace-ID` injection:** The Estimator's `ModelClient` (an HTTPX or httpx-based client) adds a default header from context. FastAPI doesn't have a built-in context mechanism for this, but a small Python `ContextVar`-based pattern works cleanly.
+
+#### 5.5.2 Java Spring Boot — ✅ Fully Aligned
+
+**Library:** `ch.qos.logback:logback-classic` (Spring Boot default) with `net.logstash.logback:logstash-logback-encoder` for JSON output.
+
+**pom.xml addition:**
+```xml
+<dependency>
+    <groupId>net.logstash.logback</groupId>
+    <artifactId>logstash-logback-encoder</artifactId>
+    <version>8.0</version>
+</dependency>
+```
+
+**logback-spring.xml:**
+```xml
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"service":"property-market-analysis"}</customFields>
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSS'Z'</timestampPattern>
+        </encoder>
+    </appender>
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
+```
+
+**Trace ID propagation:** Implement a `javax.servlet.Filter` (or Spring `OncePerRequestFilter`) that:
+1. Extracts `X-Trace-ID` from request header, or generates one via `UUID.randomUUID().toString().substring(0, 12).replace("-", "")`
+2. Stores in `MDC.put("trace_id", ...)` — Logback's `LogstashEncoder` automatically picks up MDC values
+3. RestClient auto-configuration: add `ClientHttpRequestInterceptor` that injects `X-Trace-ID` from MDC into every outgoing request
+
+**Request/response logging:** Implement a `Filter` wrapper (or use Spring Boot's `CommonsRequestLoggingFilter`) that logs one JSON line per request with method, path, status_code, latency_ms, trace_id — all as MDC values picked up by LogstashEncoder.
+
+#### 5.5.3 Next.js / Node.js — ✅ Fully Aligned
+
+**Library:** `pino` + `pino-http` + `pino-pretty` (dev only, disabled in production).
+
+**package.json:**
+```json
+{"dependencies": {"pino": "^9.5.0", "pino-http": "^10.3.0"}}
+```
+
+**Server-side:** Create a logger instance once at module load:
+```typescript
+import pino from 'pino';
+export const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  base: { service: 'web-portal' },
+  timestamp: pino.stdTimeFunctions.isoTime,
+});
+```
+
+**Trace ID propagation:** Wrap server-side `fetch` calls with a utility that:
+1. Reads `trace_id` from `AsyncLocalStorage`
+2. Injects `X-Trace-ID` header into the fetch call
+3. Creates/continues the trace context
+
+### 5.6 Implementation Summary Table
+
+| Service | Metric | Logging | Scope of Change |
+|---------|--------|---------|-----------------|
+| **task1-ml-api** (Python) | ✅ Has `prometheus_fastapi_instrumentator`, needs label name fix (`handler`→`endpoint`, add `service`, exact `status_code`) | ✅ Has JSON formatter, rename `request_id`→`trace_id`, add `service`, extend middleware | Small refinement — already 80% complete |
+| **estimator** (Python) | ❌ Missing entirely | ❌ Missing entirely | Add prometheus client middleware + JSON log middleware. Medium effort, well-defined patterns from ML API |
+| **property-market-analysis** (Java) | ❌ Missing entirely | ❌ Missing entirely | Add `prometheus-client_java` + Filter for metrics; add `logstash-logback-encoder` + Filter + MDC for trace logs. Two new classes + pom changes + logback config |
+| **web-portal** (Next.js) | ❌ Missing entirely | ❌ Missing entirely | Add `prom-client` + `/api/metrics` Route Handler; add `pino` + AsyncLocalStorage fetch wrapper |
+
+### 5.7 Verification Checklist
+
+After implementation, run these checks per service:
+
+**Metric protocol conformance:**
+```bash
+# Expected: 2xx status codes as exact strings, correct label names
+curl -s http://localhost:<port>/metrics | grep http_requests_total
+
+# Should see output like:
+# http_requests_total{service="...",endpoint="/health",method="GET",status_code="200"} N
+# NOT like:
+# http_requests_total{handler="/health",status="2xx"} N    ← WRONG (old Python format)
+# http_server_requests_seconds_count{uri="/health"} N      ← WRONG (Micrometer default)
+```
+
+**Log protocol conformance:**
+```bash
+# Expected: every line is valid JSON with required fields
+docker logs <container> --tail 100 2>&1 | while read line; do
+  echo "$line" | python3 -c "import json,sys; json.load(sys.stdin)" 2>&1 \
+    || echo "INVALID JSON: $line"
+done
+
+# Expected: trace_id propagates across services
+docker logs estimator 2>&1 | grep "trace_id" | head -5
+docker logs task1-ml-api 2>&1 | grep "trace_id" | head -5
+# Both should show the SAME trace_id values for the same user request
+```

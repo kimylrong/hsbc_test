@@ -31,7 +31,10 @@ def test_app_metrics(client: TestClient):
     assert "text/plain" in r.headers["content-type"]
     body = r.text
     assert "http_requests_total" in body
-    assert 'handler="/health"' in body
+    assert 'endpoint="/health"' in body
+    assert 'service="ml-predictor-api"' in body
+    assert 'status_code="200"' in body
+    assert 'method="GET"' in body
     assert "http_request_duration_seconds_bucket" in body
     assert 'le="0.1"' in body
     assert 'le="1.0"' in body
@@ -117,8 +120,13 @@ def test_predict_batch_empty(client: TestClient):
 
 def test_response_headers(client: TestClient):
     r = client.get("/health")
-    assert "X-Request-ID" in r.headers
+    assert "X-Trace-ID" in r.headers
     assert "X-Response-Time" in r.headers
+
+
+def test_trace_id_propagation(client: TestClient):
+    r = client.get("/health", headers={"X-Trace-ID": "custom123456"})
+    assert r.headers.get("X-Trace-ID") == "custom123456"
 
 
 def test_cors_headers(client: TestClient):

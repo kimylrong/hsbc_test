@@ -1,6 +1,6 @@
 # HSBC Fullstack Challenge — Unified Property Intelligence Portal
 
-A unified property intelligence portal hosting two independent sub-applications, reusing the house-price prediction model service from Task 1. `docker-compose.yml` builds, orchestrates, and starts all four services with a single command.
+A unified property intelligence portal hosting two independent sub-applications, backed by a shared ML prediction service.
 
 > Related documents: [Product Design](product_design.md) · [Technical Design](technical_design.md) · [Implementation Plan](plan.md)
 
@@ -9,11 +9,11 @@ A unified property intelligence portal hosting two independent sub-applications,
 ## 1. Service Architecture
 
 ```text
-                         Browser  (single entrypoint http://localhost:3000)
+                         Browser  (single entrypoint)
                                         │
                                         ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│            web_portal · Next.js App Router (Port 3000)              │
+│            web_portal · Next.js App Router (port 8000)             │
 │  Routes:  /  Home    /estimator  App 1   /market  App 2             │
 │  Proxy:   /api/estimator/**  ──► Python backend                     │
 │           /api/market/**     ──► Java backend                        │
@@ -23,75 +23,124 @@ A unified property intelligence portal hosting two independent sub-applications,
 ┌───────────────────────────────┐  ┌──────────────────────────────────┐
 │ property-value-estimator      │  │ property-market-analysis          │
 │ Python 3.12 + FastAPI + SQLite│  │ Java 21 + Spring Boot 3.4 + Cache │
-│ (Port 8001)                   │  │ (Port 8080)                       │
+│ (port 8020)                   │  │ (port 8030)                       │
 └───────────────┬───────────────┘  └────────────────┬─────────────────┘
                 │           POST /predict           │
                 └────────────────┬──────────────────┘
                                  ▼
              ┌────────────────────────────────────────────┐
-             │  task1-ml-api · FastAPI + Scikit-learn      │
-             │  House-price prediction model (Port 8000)    │
+             │  ml-predictor-api · FastAPI + Scikit-learn  │
+             │  House-price prediction model (port 8010)    │
              └────────────────────────────────────────────┘
 ```
 
 | Service | Directory | Tech Stack | Port | Description |
 | --- | --- | --- | --- | --- |
-| Model service | `service_house_price_predictor/` | Python + FastAPI + Scikit-learn | 8000 | Task 1 prediction model; called only by the two backends |
-| App 1 backend | `service_property_value_estimator/` | Python 3.12 + FastAPI + SQLite | 8001 | Single-property valuation, history |
-| App 2 backend | `service_property_market_analysis/` | Java 21 + Spring Boot 3.4 + Caffeine | 8080 | 7-dimension filtered aggregation, What-if simulation |
-| Unified portal | `web_portal/` | Next.js 16 + App Router + Tailwind | 3000 | Single browser entrypoint |
-
-> Port mapping: host port = container port = documented port (1:1). Inter-service calls use Compose internal aliases (`task1-ml-api`, `property-value-estimator`, `property-market-analysis`); the browser only accesses port 3000.
+| ml-predictor-api | `service_house_price_predictor/` | Python + FastAPI + Scikit-learn | 8010 | House-price prediction model; called only by the two backends |
+| property-value-estimator | `service_property_value_estimator/` | Python 3.12 + FastAPI + SQLite | 8020 | Single-property valuation, history |
+| property-market-analysis | `service_property_market_analysis/` | Java 21 + Spring Boot 3.4 + Caffeine | 8030 | 7-dimension filtered aggregation, What-if simulation |
+| web-portal | `web_portal/` | Next.js 16 + App Router + Tailwind | 8000 | Single browser entrypoint |
 
 ---
 
-## 2. Quick Start (Docker Compose)
+## 2. Port Plan
 
-### Prerequisites
+All services use port `8xxx` internally (inside the process or container). When running under Docker, the host-facing port is shifted by **+1000** to `9xxx` to avoid conflicts with developer-mode processes.
 
-- [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2
+| Service | Internal Port (dev & Docker container) | Docker Host Port |
+| --- | :---: | :---: |
+| web-portal | 8000 | 9000 |
+| ml-predictor-api | 8010 | 9010 |
+| property-value-estimator | 8020 | 9020 |
+| property-market-analysis | 8030 | 9030 |
 
-### One-Click Build & Start
+**Rule of thumb**: dev mode → use 8xxx directly. Docker → add 1000 for browser access.
+
+---
+
+## 3. Quick Start — Two Modes
+
+### Mode A: Docker Compose (production-like, full isolation)
+
+Prerequisites: [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2
 
 ```bash
 docker compose up -d --build
 ```
 
-The first build pulls base images and compiles each service (the Java service uses an Aliyun Maven mirror to speed up dependency downloads). Once the build completes:
+First build pulls base images and compiles each service. Once healthy:
 
 ```bash
-docker compose ps          # Check the four services (all should be healthy)
+docker compose ps                         # Check status
+docker compose logs -f web-portal         # Follow specific service logs
+docker compose down                       # Stop (volumes kept)
+docker compose down -v                    # Stop + clear all data volumes
+docker compose build <service>            # Rebuild a single service
 ```
 
-### Common Commands
+**Access (Docker host ports):**
+
+| Service | URL |
+| --- | --- |
+| Portal (browser) | http://localhost:9000 |
+| ml-predictor-api Swagger | http://localhost:9010/docs |
+| property-value-estimator Swagger | http://localhost:9020/docs |
+| property-market-analysis Swagger | http://localhost:9030/swagger-ui.html |
+
+### Mode B: Developer Mode (local processes, hot reload)
+
+Prerequisites per service:
+- **Python services**: Python 3.12 + `uv sync` already done (venv exists in each service dir)
+- **Java service**: JDK 21 + Maven
+- **Portal**: Node.js 22 + `npm install` already done
 
 ```bash
-docker compose up -d       # Start without rebuilding
-docker compose down        # Stop and remove containers (volumes kept)
-docker compose down -v     # Stop and remove containers + volumes (clears history)
-docker compose logs -f web-portal   # Follow logs of a specific service
-docker compose build <service>      # Rebuild a single service
+./dev.sh
 ```
 
----
+This one script starts all four services as local foreground processes with hot reload enabled (FastAPI `--reload`, Next.js `npm run dev`). Press `Ctrl+C` to **stop all services cleanly** — the script traps SIGINT and kills every process listening on ports 8000/8010/8020/8030 before exiting.
 
-## 3. Ports & Access Points
+If the script exits unexpectedly (e.g. your terminal closes), leftover processes are killed automatically the next time you run `./dev.sh` (it cleans the four ports before starting).
 
-| Service | Host Port | How to Access |
-| --- | --- | --- |
-| Portal (only browser entrypoint) | 3000 | http://localhost:3000 |
-| App 1 backend (debug/Swagger) | 8001 | http://localhost:8001/docs |
-| App 2 backend (debug) | 8080 | http://localhost:8080 |
-| Task 1 model (debug/Swagger) | 8000 | http://localhost:8000/docs |
+**Access (developer ports, no offset):**
 
-- App 1 page: http://localhost:3000/estimator
-- App 2 page: http://localhost:3000/market
+| Service | URL |
+| --- | --- |
+| Portal (browser) | http://localhost:8000 |
+| ml-predictor-api Swagger | http://localhost:8010/docs |
+| property-value-estimator Swagger | http://localhost:8020/docs |
+| property-market-analysis Swagger | http://localhost:8030/swagger-ui.html |
+
+### Starting Individual Services Manually
+
+If you only need to restart one service:
+
+```bash
+# ml-predictor-api
+cd service_house_price_predictor
+.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8010 --reload
+
+# property-value-estimator
+cd service_property_value_estimator
+MODEL_API_URL=http://localhost:8010 \
+.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8020 --reload
+
+# property-market-analysis
+cd service_property_market_analysis
+MODEL_API_URL=http://localhost:8010 \
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8030"
+
+# web-portal
+cd web_portal
+PY_BACKEND_URL=http://localhost:8020 JAVA_BACKEND_URL=http://localhost:8030 \
+npm run dev -- -p 8000
+```
 
 ---
 
 ## 4. API Overview
 
-### Task 1 Model Service (8000)
+### ml-predictor-api (internal port 8010)
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -100,21 +149,27 @@ docker compose build <service>      # Rebuild a single service
 | POST | `/predict` | Single-property prediction, returns `{"price": <float>}` |
 | POST | `/predict/batch` | Batch prediction |
 
-### App 1 Python Backend (8001)
+Interactive docs at `/docs` (FastAPI Swagger UI).
+
+### property-value-estimator (internal port 8020)
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/ready` / `/health` | Health check |
-| POST | `/api/estimator/predict` | Validate → call model → persist; returns predicted price, mean price, distribution reference, record |
+| POST | `/api/estimator/predict` | Validate → call model → persist |
 | GET | `/api/estimator/history` | Historical valuation records |
 
-### App 2 Java Backend (8080)
+Interactive docs at `/docs` (FastAPI Swagger UI).
+
+### property-market-analysis (internal port 8030)
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/ready` / `/health` | Health check |
-| POST | `/api/market/analyze` | 7-dimension filtered segmented aggregation (`FilterCriteria`) |
+| POST | `/api/market/analyze` | 7-dimension filtered segmented aggregation |
 | POST | `/api/market/what-if` | What-if simulation |
+
+Interactive docs at `/swagger-ui.html` (SpringDoc Swagger UI).
 
 **7 house features** (consistent across all three services):
 
@@ -122,35 +177,25 @@ docker compose build <service>      # Rebuild a single service
 
 ---
 
-## 5. Local Development (Without Docker)
+## 5. Image & Dependency Acceleration Notes
 
-| Service | Command | Notes |
-| --- | --- | --- |
-| Task 1 | `cd service_house_price_predictor && uv sync && uvicorn src.main:app --port 8000` | Requires `uv` |
-| App 1 | `cd service_property_value_estimator && uv sync && uvicorn src.main:app --port 8001` | Requires `uv` |
-| App 2 | `cd service_property_market_analysis && mvn spring-boot:run` | Requires JDK 21 + Maven |
-| Portal | `cd web_portal && npm install && npm run dev` | Requires Node.js 22 |
+- **Docker Hub registry mirrors**: Configure at host level under `~/.docker/daemon.json` (`registry-mirrors`). This is **not inside this repo** and **must not be committed**.
+- **Maven dependency mirrors**: The Java service uses an Aliyun Maven mirror via `service_property_market_analysis/settings.xml`. Versioned with the code.
 
 ---
 
-## 6. Image & Dependency Acceleration Notes
-
-- **Docker Hub registry mirrors**: Host-level configuration under `~/.docker/daemon.json` (`registry-mirrors`). This is **not inside this repo** and **must not be committed**. Configure your own mirror or ensure direct access to Docker Hub when building on a new machine.
-- **Maven dependency mirrors**: The Java service uses an Aliyun Maven mirror (`maven.aliyun.com`) during build via `service_property_market_analysis/settings.xml`. This file **is in the repo**, versioned with the code, so any machine can benefit.
-
----
-
-## 7. Repository Structure
+## 6. Repository Structure
 
 ```text
 hsbc_challenge/
-├── service_house_price_predictor/      # Task 1 house-price prediction model service
-├── service_property_value_estimator/   # App 1 backend: FastAPI + SQLite (8001)
-├── service_property_market_analysis/   # App 2 backend: Spring Boot (8080)
-├── web_portal/                         # Portal: Next.js App Router (3000)
-├── docker-compose.yml                  # One-click orchestration: build images + internal network + volumes
-├── product_design.md                   # Product design
-├── technical_design.md                 # Technical design
-├── plan.md                             # Implementation plan
-└── README.md                           # This file
+├── service_house_price_predictor/      # ml-predictor-api: FastAPI + Scikit-learn (8010)
+├── service_property_value_estimator/   # property-value-estimator: FastAPI + SQLite (8020)
+├── service_property_market_analysis/   # property-market-analysis: Spring Boot (8030)
+├── web_portal/                         # Portal: Next.js App Router (8000)
+├── docker-compose.yml                  # One-click Docker orchestration
+├── dev.sh                              # One-click developer-mode startup
+├── product_design.md
+├── technical_design.md
+├── plan.md
+└── README.md
 ```

@@ -1,0 +1,464 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "ml-predictor-api",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "QPS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"ml-predictor-api\", status_code=~\"2..\"}[5m]))",
+          "legendFormat": "{{endpoint}} success",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"ml-predictor-api\", status_code=~\"[^2]..\"}[5m]))",
+          "legendFormat": "{{endpoint}} error",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Latency p90 / p99",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"ml-predictor-api\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p90",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"ml-predictor-api\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"ml-predictor-api\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p90",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"ml-predictor-api\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p99",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "property-value-estimator",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "QPS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"property-value-estimator\", status_code=~\"2..\"}[5m]))",
+          "legendFormat": "{{endpoint}} success",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"property-value-estimator\", status_code=~\"[^2]..\"}[5m]))",
+          "legendFormat": "{{endpoint}} error",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Latency p90 / p99",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-value-estimator\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p90",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-value-estimator\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-value-estimator\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p90",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-value-estimator\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p99",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "property-market-analysis",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "QPS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"property-market-analysis\", status_code=~\"2..\"}[5m]))",
+          "legendFormat": "{{endpoint}} success",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"property-market-analysis\", status_code=~\"[^2]..\"}[5m]))",
+          "legendFormat": "{{endpoint}} error",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Latency p90 / p99",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-market-analysis\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p90",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-market-analysis\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-market-analysis\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p90",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"property-market-analysis\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p99",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "web-portal",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "QPS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"web-portal\", status_code=~\"2..\"}[5m]))",
+          "legendFormat": "{{endpoint}} success",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (endpoint) (rate(http_requests_total{service=\"web-portal\", status_code=~\"[^2]..\"}[5m]))",
+          "legendFormat": "{{endpoint}} error",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Latency p90 / p99",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"web-portal\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p90",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"web-portal\", status_code=~\"2..\"}[5m])))",
+          "legendFormat": "{{endpoint}} success p99",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"web-portal\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p90",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{service=\"web-portal\", status_code=~\"[^2]..\"}[5m])))",
+          "legendFormat": "{{endpoint}} error p99",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom",
+        "showLegend": true,
+        "calcs": [
+          "lastNotNull",
+          "mean",
+          "max"
+        ]
+      }
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "hsbc",
+    "services"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "HSBC Services Overview",
+  "uid": "hsbc-overview",
+  "version": 2,
+  "weekStart": ""
+}

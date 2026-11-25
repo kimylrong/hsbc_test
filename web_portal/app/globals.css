@@ -23,7 +23,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-*:focus-visible {
+*:focus-visible:not(input):not(select):not(textarea):not([type="button"]):not([type="submit"]) {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
   border-radius: 4px;

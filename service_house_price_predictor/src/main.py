@@ -1,6 +1,6 @@
+import contextvars
 import json
 import logging
-import os
 import time
 import uuid
 from collections import deque
@@ -11,11 +11,11 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
 from .models import (
     BatchPredictionRequest,
@@ -25,46 +25,64 @@ from .models import (
     FEATURE_COLUMNS,
 )
 
+SERVICE_NAME = "ml-predictor-api"
+_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 30.0, 60.0)
+
+_trace_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("trace_id", default=None)
+
+_http_requests_total = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["service", "endpoint", "method", "status_code"],
+)
+
+_http_request_duration = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency",
+    ["service", "endpoint", "method", "status_code"],
+    buckets=_BUCKETS,
+)
+
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         entry = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
+            "service": SERVICE_NAME,
             "logger": record.name,
+            "file.name": record.filename,
+            "line.number": record.lineno,
+            "function.name": record.funcName,
             "message": record.getMessage(),
         }
-        request_id = getattr(record, "request_id", None)
-        if request_id:
-            entry["request_id"] = request_id
+        for field in ("trace_id", "method", "path", "status_code", "latency_ms"):
+            value = getattr(record, field, None)
+            if value is not None:
+                entry[field] = value
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry)
 
 
-class _SafeFormatter(logging.Formatter):
-    def formatMessage(self, record: logging.LogRecord) -> str:
-        if not hasattr(record, "request_id"):
-            record.request_id = "-"
-        return super().formatMessage(record)
+class _TraceAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        extra = kwargs.setdefault("extra", {})
+        if "trace_id" not in extra:
+            extra["trace_id"] = _trace_id_var.get() or None
+        return msg, kwargs
 
-
-if os.environ.get("LOG_FORMAT") == "json":
-    _formatter = _JsonFormatter()
-else:
-    _formatter = _SafeFormatter(
-        "%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s"
-    )
 
 _handler = logging.StreamHandler()
-_handler.setFormatter(_formatter)
+_handler.setFormatter(_JsonFormatter())
 
 _root = logging.getLogger()
 _root.handlers.clear()
 _root.addHandler(_handler)
 _root.setLevel(logging.INFO)
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
+logger = _TraceAdapter(_logger, {})
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
@@ -153,54 +171,70 @@ app.add_middleware(
 )
 
 
-Instrumentator(
-    should_group_status_codes=True,
-    should_ignore_untemplated=True,
-    excluded_handlers=["/docs", "/redoc", "/openapi.json"],
-).instrument(app).expose(app)
-
-
 @app.middleware("http")
 async def _observability(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex[:12])
+    trace_id = request.headers.get("X-Trace-ID") or uuid.uuid4().hex[:12]
+    _trace_id_var.set(trace_id)
     start = time.perf_counter()
+    endpoint = request.url.path
+    method = request.method
+
+    if endpoint == "/metrics":
+        _trace_id_var.set(None)
+        return await call_next(request)
 
     if not rate_limiter.is_allowed():
         latency_ms = (time.perf_counter() - start) * 1000
+        status = "429"
+        _http_requests_total.labels(SERVICE_NAME, endpoint, method, status).inc()
+        _http_request_duration.labels(SERVICE_NAME, endpoint, method, status).observe(latency_ms / 1000)
         logger.warning(
-            "Rate limit exceeded path=%s latency_ms=%.1f count=%d",
-            request.url.path, latency_ms, rate_limiter.current_count,
+            "Rate limit exceeded method=%s path=%s latency_ms=%.1f count=%d",
+            method, endpoint, latency_ms, rate_limiter.current_count,
+            extra={"method": method, "path": endpoint, "status_code": 429, "latency_ms": latency_ms},
         )
         resp = JSONResponse(
             status_code=429,
             content={"detail": f"Rate limit exceeded ({rate_limiter.max_requests}/{rate_limiter.window}s)"},
         )
-        resp.headers["X-Request-ID"] = request_id
+        resp.headers["X-Trace-ID"] = trace_id
         resp.headers["Retry-After"] = str(rate_limiter.window)
         return resp
-
-    logging_adapter = logging.LoggerAdapter(logger, {"request_id": request_id})
 
     try:
         response = await call_next(request)
     except Exception:
         latency_ms = (time.perf_counter() - start) * 1000
-        logging_adapter.exception(
+        status = "500"
+        _http_requests_total.labels(SERVICE_NAME, endpoint, method, status).inc()
+        _http_request_duration.labels(SERVICE_NAME, endpoint, method, status).observe(latency_ms / 1000)
+        logger.exception(
             "Unhandled exception method=%s path=%s latency_ms=%.1f",
-            request.method, request.url.path, latency_ms,
+            method, endpoint, latency_ms,
+            extra={"method": method, "path": endpoint, "status_code": 500, "latency_ms": latency_ms},
         )
         raise
 
     latency_ms = (time.perf_counter() - start) * 1000
-    response.headers["X-Request-ID"] = request_id
+    status = str(response.status_code)
+    _http_requests_total.labels(SERVICE_NAME, endpoint, method, status).inc()
+    _http_request_duration.labels(SERVICE_NAME, endpoint, method, status).observe(latency_ms / 1000)
+
+    response.headers["X-Trace-ID"] = trace_id
     response.headers["X-Response-Time"] = f"{latency_ms:.2f}ms"
 
-    logging_adapter.info(
-        "%s %s status=%d latency_ms=%.1f",
-        request.method, request.url.path, response.status_code, latency_ms,
+    logger.info(
+        "%s %s status=%s latency_ms=%.1f",
+        method, endpoint, status, latency_ms,
+        extra={"method": method, "path": endpoint, "status_code": response.status_code, "latency_ms": latency_ms},
     )
 
     return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.exception_handler(RequestValidationError)
@@ -210,7 +244,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         loc = ".".join(str(p) for p in err["loc"])
         msg = err["msg"]
         errors.append({"field": loc, "message": msg})
-    logger.warning("Validation error on %s: %s", request.url.path, errors)
+    logger.warning(
+        "Validation error on %s: %s", request.url.path, errors,
+        extra={"method": request.method, "path": request.url.path, "status_code": 422},
+    )
     return JSONResponse(
         status_code=422,
         content={"detail": "Validation failed", "errors": errors},
@@ -219,7 +256,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s", request.url.path)
+    logger.exception(
+        "Unhandled error on %s", request.url.path,
+        extra={"method": request.method, "path": request.url.path, "status_code": 500},
+    )
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
@@ -294,4 +334,4 @@ async def predict_batch(request: Request, body: BatchPredictionRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("src.main:app", host="0.0.0.0", port=8010, reload=True)

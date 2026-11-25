@@ -1,79 +1,80 @@
 services:
-  # Task 1: property price prediction model service (internal-only, called by backends)
-  task1-ml-api:
+  ml-predictor-api:
     build:
       context: ./service_house_price_predictor
-    image: hsbc/task1-ml-api
+    image: hsbc/ml-predictor-api
     ports:
-      - "8000:8000"
+      - "9010:8010"
     networks:
       - hsbc-net
+    logging:
+      driver: json-file
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ready').status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8010/ready').status==200 else 1)"]
       interval: 5s
       timeout: 3s
       retries: 24
       start_period: 5s
 
-  # App 1: Property Value Estimator backend (FastAPI + SQLite)
   property-value-estimator:
     build:
       context: ./service_property_value_estimator
     image: hsbc/property-value-estimator
     environment:
-      MODEL_API_URL: http://task1-ml-api:8000
+      MODEL_API_URL: http://ml-predictor-api:8010
       DB_PATH: /app/data/estimates.db
     ports:
-      - "8001:8001"
+      - "9020:8020"
     volumes:
       - estimator-data:/app/data
     depends_on:
-      task1-ml-api:
+      ml-predictor-api:
         condition: service_healthy
     networks:
       - hsbc-net
+    logging:
+      driver: json-file
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/ready').status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8020/ready').status==200 else 1)"]
       interval: 5s
       timeout: 3s
       retries: 24
       start_period: 5s
 
-  # App 2: Property Market Analysis backend (Spring Boot + Caffeine cache)
   property-market-analysis:
     build:
       context: ./service_property_market_analysis
     image: hsbc/property-market-analysis
     environment:
-      MODEL_API_URL: http://task1-ml-api:8000
+      MODEL_API_URL: http://ml-predictor-api:8010
     ports:
-      - "8080:8080"
+      - "9030:8030"
     depends_on:
-      task1-ml-api:
+      ml-predictor-api:
         condition: service_healthy
     networks:
       - hsbc-net
+    logging:
+      driver: json-file
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
+      test: ["CMD", "curl", "-f", "http://localhost:8030/ready"]
       interval: 5s
       timeout: 3s
       retries: 24
       start_period: 10s
 
-  # Portal: unified Next.js web app (SSR + client, single entry point)
   web-portal:
     build:
       context: ./web_portal
       args:
-        PY_BACKEND_URL: http://property-value-estimator:8001
-        JAVA_BACKEND_URL: http://property-market-analysis:8080
+        PY_BACKEND_URL: http://property-value-estimator:8020
+        JAVA_BACKEND_URL: http://property-market-analysis:8030
     image: hsbc/web-portal
     environment:
-      PY_BACKEND_URL: http://property-value-estimator:8001
-      JAVA_BACKEND_URL: http://property-market-analysis:8080
+      PY_BACKEND_URL: http://property-value-estimator:8020
+      JAVA_BACKEND_URL: http://property-market-analysis:8030
     ports:
-      - "3000:3000"
-
+      - "9000:8000"
     depends_on:
       property-value-estimator:
         condition: service_healthy
@@ -81,12 +82,97 @@ services:
         condition: service_healthy
     networks:
       - hsbc-net
+    logging:
+      driver: json-file
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 24
       start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+    networks:
+      - hsbc-net
+    logging:
+      driver: json-file
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - hsbc-net
+    logging:
+      driver: json-file
+    depends_on:
+      - prometheus
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - hsbc-net
+    logging:
+      driver: json-file
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - hsbc-net
+    logging:
+      driver: json-file
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.12.0
+    user: root
+    volumes:
+      - ./observability/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    networks:
+      - hsbc-net
+    logging:
+      driver: json-file
+    depends_on:
+      - elasticsearch
 
 networks:
   hsbc-net:
@@ -94,3 +180,6 @@ networks:
 
 volumes:
   estimator-data:
+  prometheus-data:
+  grafana-data:
+  es-data:

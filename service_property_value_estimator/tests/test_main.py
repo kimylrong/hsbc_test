@@ -42,7 +42,7 @@ def client(tmp_path_factory):
     data_dir = tmp_path_factory.mktemp("data")
     os.environ["DB_PATH"] = str(data_dir / "estimates.db")
     os.environ["DATASET_PATH"] = str(DATASET)
-    os.environ["MODEL_API_URL"] = "http://localhost:8000"
+    os.environ["MODEL_API_URL"] = "http://localhost:8010"
     with TestClient(app) as c:
         c.app.state.model_client = FakeModelClient()
         yield c
